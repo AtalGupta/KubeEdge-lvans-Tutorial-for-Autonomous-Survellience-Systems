@@ -1,96 +1,197 @@
-# Ianvs Tutorial for Edge-Based Autonomous Surveillance System with KubeEdge and Vision-Language Models
+# CNCF – KubeEdge Autonomous Surveillance System Tutorial  
+*Atal Gupta, 23rd February 2025*
 
-## Introduction
+## Overview
 
-This tutorial demonstrates how to implement benchmarks for an **autonomous surveillance system** using Ianvs, a benchmarking tool originally designed for cloud-edge collaborative inference with LLMs, adapted here for vision-language models (VLMs). The system deploys 20 edge nodes (e.g., smart cameras) managed by KubeEdge, each processing video data locally to generate text descriptions of persons and vehicles for re-identification (ReID) and supporting natural language querying (e.g., "find the person in a red shirt"). By integrating Ianvs, we evaluate a query-routing strategy that balances lightweight edge inference with powerful cloud inference, optimizing latency, privacy, and accuracy in a distributed surveillance network.
+This tutorial shows how to set up Ianvs for evaluating a vision-language re-identification algorithm on an edge-based surveillance system. In our use case, each of the 20 edge nodes (smart cameras) locally processes images (organized into two subtypes: visual and person-specific) and generates basic text captions using a BLIP model. These image–text pairs are then used for re-identification and natural language querying. The system leverages KubeEdge to manage distributed edge devices and Ianvs to benchmark the query-routing strategy between a lightweight edge model and a more powerful cloud model.
 
-### Why VLMs Need Cloud-Edge Collaborative Inference?
+---
 
-Modern VLMs, such as BLIP or LLaVA, excel at generating text from images but vary in size and capability. Small-scale VLMs (e.g., <3B parameters) can run on edge devices like smart cameras, offering low-latency and privacy-preserving inference. However, their accuracy may falter with complex images (e.g., occlusions, poor lighting), while larger VLMs (e.g., 13B+ parameters) deployed in the cloud provide superior performance at the cost of higher latency and privacy risks due to data transmission. Key challenges include:
+## Prerequisites
 
-- **Latency**: Transmitting raw images to the cloud increases Time to First Token (TTFT) for text generation, delaying ReID in time-sensitive scenarios.
-- **Privacy**: Uploading video data risks exposing sensitive information, conflicting with regulations like GDPR.
-- **Cost**: Cloud API calls for advanced VLMs are expensive, especially for continuous surveillance.
-- **Task Variability**: Not all ReID tasks require heavy models—simple descriptions (e.g., "red car") can be handled locally.
+- **Hardware**:  
+  - A machine (laptop or VM) for simulation  
+  - (Optionally) 20 edge devices (e.g., Raspberry Pi 5, NVIDIA Jetson)  
+- **Software**:  
+  - KubeEdge (v1.15+), Docker, Python 3.8+, PyTorch, Hugging Face Transformers  
+  - Git  
+- **Dataset**:  
+  - Combined surveillance test set (as described in your report) with a structure similar to:  
+    ```
+    ./dataset/surveillance-reid/
+      ├── final_images/
+      │   ├── c1/
+      │   │   ├── v/          # visual images
+      │   │   └── p/          # person-specific images
+      │   ├── c2/
+      │   │   ├── v/
+      │   │   └── p/
+      │   └── ...             # up to 20 cameras
+      └── data_caption/
+          ├── c1.json         # image–text pairs for camera c1
+          ├── c2.json         # image–text pairs for camera c2
+          └── ...             
+    ```
+- **Model Consideration**:  
+  - A lightweight edge VLM (e.g., BLIP-based captioner)  
+  - A cloud-based VLM (for hard cases or advanced querying)
 
-Cloud-edge collaboration addresses these by deploying small VLMs on edge nodes for fast, private processing of easy tasks, while routing complex queries to a cloud-based large VLM, optimizing performance and resource use.
+---
 
-### Collaborative Inference Strategy
+## Step 1. Prepare the Environment
 
-We adopt Ianvs’ **Query Routing** strategy, routing image queries to either an edge VLM (e.g., LLaVA-Phi) or a cloud VLM (e.g., LLaVA-13B) based on difficulty:
-- Easy queries (e.g., clear images) are processed locally for speed and privacy.
-- Hard queries (e.g., occluded or multi-object scenes) are sent to the cloud for accuracy.
-This tutorial uses Ianvs’ `inference-then-mining` mode, where inference occurs first, followed by hard-example mining to assess difficulty and route accordingly.
+1. **Create and Activate a Conda Environment:**
 
-## Required Resources
+   ```bash
+   conda create -n ianvs-surveillance python=3.8
+   conda activate ianvs-surveillance
+   ```
 
-- **Hardware**: One machine to simulate the setup (a full 20-node deployment requires edge devices):
-  - 2+ CPUs, 1 GPU (6GB+ memory), 4GB+ RAM, 10GB+ disk space.
-  - For full deployment: 20 edge devices (e.g., Raspberry Pi 5 or NVIDIA Jetson).
-- **Software**:
-  - KubeEdge (v1.15+), Docker, Python 3.8+, PyTorch, Hugging Face Transformers.
-  - Ianvs installed (see Step 1).
-- **Dataset**: Combined Market-1501, VeRi-776, and PKU-ReID test set (~83,849 images, 2,334 identities) redistributed across 20 cameras (see report Task 1.2).
-- **Network**: Internet for initial setup; edge nodes can operate offline post-deployment.
+2. **Clone the Ianvs Repository and Install Dependencies:**
 
-## Step 1. Ianvs Preparation
+   ```bash
+   git clone https://github.com/kubeedge/ianvs.git
+   cd ianvs
+   ```
 
-```bash
-# Create and activate a conda environment
-conda create -n ianvs-surveillance python=3.8
-conda activate ianvs-surveillance
+   Install Sedna (a dependency for Ianvs):
 
-# Clone Ianvs repository
-git clone https://github.com/kubeedge/ianvs.git
-cd ianvs
+   ```bash
+   pip install examples/resources/third_party/sedna-0.6.0.1-py3-none-any.whl
+   ```
 
-# Install Sedna (dependency for Ianvs)
-pip install examples/resources/third_party/sedna-0.6.0.1-py3-none-any.whl
+   Install example-specific dependencies:
 
-# Install example-specific dependencies
-pip install -r examples/cloud-edge-collaborative-inference-for-llm/requirements.txt
+   ```bash
+   pip install -r examples/surveillance-reid/testenv/requirements.txt
+   ```
 
-# Install Ianvs core dependencies
-pip install -r requirements.txt
+   Install Ianvs core dependencies and then Ianvs itself:
 
-# Install Ianvs
-python setup.py install
-```
+   ```bash
+   pip install -r requirements.txt
+   python setup.py install
+   ```
 
-## Step 2. Dataset and Model Preparation
+---
 
-### Dataset Configuration
+## Step 2. Dataset Preparation
 
-1. **Prepare Dataset**:
-   - Use the combined dataset from your report (Task 1.2), with images redistributed across 20 virtual cameras (e.g., ~1400 images per node for 19 nodes, ~500 for 1 node).
-   - Structure it for Ianvs:
-     ```
-      ./dataset/surveillance-reid/
-        ├── final_images/
-        │   ├── c1/
-        │   │   ├── v/          # images of type v
-        │   │   └── p/          # images of type p
-        │   ├── c2/
-        │   │   ├── v/
-        │   │   └── p/
-        │   └── ...             # similarly for other camera nodes (up to 20)
-        └── data_caption/
-            ├── c1.json         # image-text pairs for camera c1
-            ├── c2.json         # image-text pairs for camera c2
-            └── ...             # additional caption files as needed
+1. **Structure Your Dataset:**
 
-     ```
- 
+   Prepare the surveillance dataset as follows:
 
-2. **Place Dataset**:
-   - Move `surveillance-reid/` to `ianvs/dataset/`.
-   - Update paths in `examples/surveillance-reid/testenv/testenv.yaml` if not using the default location.
+   ```
+   ./dataset/surveillance-reid/
+     ├── final_images/
+     │   ├── c1/
+     │   │   ├── v/          # visual images
+     │   │   └── p/          # person-specific images
+     │   ├── c2/
+     │   │   ├── v/
+     │   │   └── p/
+     │   └── ...             # additional camera nodes (up to 20)
+     └── data_caption/
+         ├── c1.json         # image–text pairs for camera c1
+         ├── c2.json         # image–text pairs for camera c2
+         └── ...             
+   ```
 
-### Metric Configuration
+2. **Place the Dataset in Ianvs:**
 
-Define metrics in `examples/surveillance-reid/testenv/testenv.yaml` to evaluate performance:
-- **Accuracy**: Correctness of text descriptions for ReID.
-- **Edge Ratio**: Proportion of queries processed on edge.
-- **TTFT**: Time to generate the first text token from an image.
-- **Throughput**: Descriptions generated per second.
-- **Cloud/Edge Tokens**: Number of tokens processed by each model.
+   Move the `surveillance-reid` folder into the `ianvs/dataset/` directory. If dataset location differs, update the paths in the configuration file at:  
+   `examples/surveillance-reid/testenv/testenv.yaml`.
+
+---
+
+## Step 3. Model and Metric Configuration
+
+1. **Model Configuration:**
+
+   In the configuration file (e.g., `examples/surveillance-reid/testenv/testenv.yaml` or a dedicated algorithm config), set up your models:
+   
+   - **EdgeModel**: This model runs on each edge device (e.g., using a BLIP-based caption generator).
+   - **CloudModel**: This model is deployed in the cloud for hard cases.
+
+   Update parameters such as model name, inference backend, temperature, and maximum tokens. For example, you may use:
+   
+   ```yaml
+   edge_model:
+     model: "BLIP-small"
+     backend: "huggingface"
+     temperature: 0.8
+     top_p: 0.8
+     max_tokens: 512
+
+   cloud_model:
+     model: "Advanced-VLM-13B"
+     temperature: 0.8
+     top_p: 0.8
+     max_tokens: 512
+   ```
+
+2. **Metric Configuration:**
+
+   Define the metrics in your test environment configuration to measure:
+   
+   - Accuracy of re-identification (text description correctness)
+   - Edge Ratio (proportion of queries processed on edge)
+   - Time to First Token (TTFT)
+   - Throughput (descriptions generated per second)
+   - Token consumption on both edge and cloud
+
+   These metrics are calculated automatically by Ianvs based on your configuration in `testenv.yaml`.
+
+---
+
+## Step 4. Running the Benchmark
+
+1. **Start the KubeEdge Cluster:**
+
+   Ensure your KubeEdge cluster is up and running and that your edge nodes are connected. (For a local test, a single machine simulation is acceptable.)
+
+2. **Launch the Benchmarking Job:**
+
+   Run the following command from the root of the Ianvs repository:
+
+   ```bash
+   ianvs -f examples/surveillance-reid/testenv/testenv.yaml
+   ```
+
+   During execution, Ianvs will:
+   - Load the test dataset (image and caption pairs)
+   - Route each query to either the edge or cloud model based on the difficulty determined by your hard example mining module
+   - Cache results to save repeated API calls during multi-round testing
+
+3. **Monitor the Output:**
+
+   As the job progresses, you will see log messages indicating:
+   - Loading of dataset images from each camera node
+   - Inference start and finish times
+   - Model-specific logs (e.g., parameters used by the edge and cloud models)
+
+---
+
+## Step 5. Evaluating the Results
+
+1. **Check the Output Reports:**
+
+   After completion, Ianvs will generate a ranking file (e.g., `rank.csv` and `selected_rank.csv`) under the `ianvs/workspace` directory. These files include:
+   
+   - Accuracy, Edge Ratio, TTFT, Throughput, and token metrics for each configuration tested
+   - Comparative results for different router strategies (e.g., EdgeOnly, CloudOnly, Query Routing)
+
+2. **Analyze Performance:**
+
+   Use these results to evaluate the benefits of cloud–edge collaboration. For instance:
+   
+   - A higher Edge Ratio indicates more queries processed locally, reducing latency and preserving privacy.
+   - Compare the TTFT and throughput metrics between different models to decide if the lightweight edge model meets your application’s needs.
+
+3. **Iterate and Optimize:**
+
+   Based on your findings, adjust model parameters, router configurations, or dataset distribution. Rerun the benchmarking job to compare the impact of different settings.
+
+---
+
+This step-by-step tutorial guides you through setting up and evaluating a vision-language re-identification algorithm on a KubeEdge-managed autonomous surveillance system using Ianvs. By preparing a realistic, distributed test dataset and configuring both edge and cloud models, you can benchmark the effectiveness of a cloud–edge collaborative inference strategy for real-time surveillance applications. For further details and updates, refer to the full tutorial documentation provided in the Ianvs repository.
